@@ -1,0 +1,4 @@
+/helm-charts
+*.yaml
+!*.production.yaml
+!*.example.yaml
