@@ -13,7 +13,19 @@
 
 ## Table of Contents
 
-文件與研究未完成，待完成後再補完
+- [前置準備](#前置準備)
+- [安裝](#安裝)
+- [建立 GatewayClass](#建立-gatewayclass)
+- [建立 Gateway](#建立-gateway)
+- [建立 HTTPRoute 或 TLSRoute](#建立-httproute-或-tlsroute)
+- [建立 TCPRoute 或 UDPRoute](#建立-tcproute-或-udproute)
+- [測試 Envoy Gateway](#測試-envoy-gateway)
+  - [測試 HTTPRoute](#測試-httproute)
+  - [測試 TCPRoute](#測試-tcproute)
+- [常見問題](#常見問題)
+  - [ingress-nginx 的 ModSecurity 怎麼辦](#ingress-nginx-的-modsecurity-怎麼辦)
+  - [有沒有等價於 ingress-nginx 的 444 狀態碼關閉連線呢](#有沒有等價於-ingress-nginx-的-444-狀態碼關閉連線呢)
+- [參考資料](#參考資料)
 
 ## 前置準備
 
@@ -162,9 +174,55 @@ spec:
 
 ## 建立 TCPRoute 或 UDPRoute
 
-待測試
+TCPRoute 與 UDPRoute 得建立方式與前面 HTTPRoute 很像，先把 GatewayClass、Gateway、Deployment 和 Service 準備好後，主要的差異在於 Gateway 需改成監聽 TCP 以及 HTTPRoute 要更換為 TCPRoute，如下範例：
+
+> UDPRoute 其實就是把 Gateway 資源中的 `spec.listeners[*].protocol` 改為 `UDP`，並將 `TCPRoute` 的 `kind` 更改為 `UDPRoute` 就是了
+
+- Gateway
+
+  ```yaml
+  # tcp-gateway.yaml
+  apiVersion: gateway.networking.k8s.io/v1
+  kind: Gateway
+  metadata:
+    name: tcp-gateway
+  spec:
+    gatewayClassName: envoy-gateway-demo-class
+    listeners:
+      - name: foo
+        # Change to listen on TCP protocol
+        protocol: TCP
+        port: 8088
+        allowedRoutes:
+          kinds:
+            - kind: TCPRoute
+  ```
+
+- TCPRoute
+
+  指定由哪個 Gateway 處理流量以及該流量應流向哪個後端服務
+
+  ```yaml
+  # tcp-route.yaml
+  apiVersion: gateway.networking.k8s.io/v1alpha2
+  kind: TCPRoute
+  metadata:
+    name: tcp-app-1
+  spec:
+    parentRefs:
+      - name: tcp-gateway
+        sectionName: foo
+    rules:
+      - backendRefs:
+        - name: foo
+          port: 3001
+  ```
 
 ## 測試 Envoy Gateway
+
+以下將會區分為測試 HTTPRoute 與 TCPRoute 兩種方式
+
+### 測試 HTTPRoute
 
 官方有提供一個[測試的 yaml 檔](https://gateway.envoyproxy.io/docs/tasks/quickstart/#installation)，直接部署後觀察以下幾項資源的狀態是否正常
 
@@ -195,7 +253,60 @@ spec:
 }
 ```
 
-## ingress-nginx 的 ModSecurity 怎麼辦
+### 測試 TCPRoute
+
+透過將[官方文件](https://gateway.envoyproxy.io/docs/tasks/traffic/tcp-routing/)內容整理過後的 `kubernetes/tcp-quickstart.yaml` 部署到 Kubernetes 後，等所有 Pod 狀態都為 Up 時，可以執行以下兩種測試：
+
+> `YOUR_IP` 指的是部署 Envoy Gateway 機器的對外 IP
+
+- 透過 NCat 工具測試
+
+  執行 `nc -zv YOUR_IP 8088` 做連線測試，預期會得到類似於以下的回應
+
+  ```shell
+  [smkz@TestLinux ~]$ nc -zv YOUR_IP 8088
+  Ncat: Version 7.92 (https://nmap.org/ncat )
+  Ncat: Connected to YOUR_IP:8088.
+  Ncat: 0 bytes sent, 0 bytes received in 0.01 seconds.
+  ```
+
+- 透過 curl 工具測試
+
+  執行 `curl -i http://YOUR_IP:8088` 做連線測試，預期會得到類似於以下的回應
+
+  ```shell
+  [smkz@TestLinux ~]$ curl -i http://YOUR_IP:8088
+  HTTP/1.1 200 OK
+  Content-Type: application/json
+  X-Content-Type-Options: nosniff
+  Date: Tue, 05 May 2026 11:32:20 GMT
+  Content-Length: 265
+
+  {
+  "path": "/",
+  "host": "YOUR_IP:8088",
+  "method": "GET",
+  "proto": "HTTP/1.1",
+  "headers": {
+    "Accept": [
+    "*/*"
+    ],
+    "User-Agent": [
+    "curl/7.76.1"
+    ]
+  },
+  "namespace": "default",
+  "ingress": "",
+  "service": "foo",
+  "pod": "backend-1"
+  }
+  ```
+
+## 常見問題
+
+目前在移轉 Envoy Gateway 後的一些疑問整理如下
+
+### ingress-nginx 的 ModSecurity 怎麼辦
 
 Envoy Gateway 可以透過 [WASM 外掛](https://gateway.envoyproxy.io/docs/tasks/extensibility/wasm/)來達到不修改 Envoy Gateway 核心程式碼就可以做到流量過濾的需求
 
@@ -244,6 +355,12 @@ Envoy Gateway 可以透過 [WASM 外掛](https://gateway.envoyproxy.io/docs/task
 3. 透過指令 `curl -i http://YOUR_DOMAIN/YOUR_PATH` 檢查回應中是否飽含有類似於 `x-wasm-custom: FOO` 的 Header 在回應中，若有表示部署成功
 4. 持續調教與篩選規則，直到其符合所有安全性規範
 
+### 有沒有等價於 ingress-nginx 的 444 狀態碼關閉連線呢
+
+目前 Envoy Gateway 做不到像 ingress-nginx 直接以 HTTP 狀態碼 444 關閉連線，但可透過 [SecurityPolicy](https://gateway.envoyproxy.io/docs/concepts/gateway_api_extensions/security-policy/) 來做到回應 403 拒絕連線的效果
+
+若真的想要等價的完成 ingress-nginx 的 444 關閉連線，最佳做法還是透過 Calico 或是 firewalld 這類服務來阻擋比較安全
+
 ## 參考資料
 
 - [Gateway API - Kubernetes 文檔](https://kubernetes.io/zh-cn/docs/concepts/services-networking/gateway/#api-kind-httproute)
@@ -252,3 +369,4 @@ Envoy Gateway 可以透過 [WASM 外掛](https://gateway.envoyproxy.io/docs/task
 - [How to Set Up Kubernetes Gateway API TLSRoute for Passthrough TLS](https://oneuptime.com/blog/post/2026-02-09-gateway-api-tlsroute-passthrough-tls/view)
 - [Wasm Extension - Envoy Gateway](https://gateway.envoyproxy.io/docs/tasks/extensibility/wasm/)
 - [corazawaf/coraza-proxy-wasm - GitHub](https://github.com/corazawaf/coraza-proxy-wasm)
+- [Security Policy - Envoy Gateway](https://gateway.envoyproxy.io/docs/concepts/gateway_api_extensions/security-policy/)
